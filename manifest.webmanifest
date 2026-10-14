@@ -1,0 +1,20 @@
+{
+  "id": "./",
+  "name": "Margin Reader",
+  "short_name": "Margin",
+  "description": "A live reading companion for discovering words on the page.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f2f2f7",
+  "theme_color": "#f2f2f7",
+  "icons": [
+    {
+      "src": "./margin-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
