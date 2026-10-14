@@ -1,9 +1,20 @@
-const CACHE_NAME = 'margin-reader-v3'
+const CACHE_NAME = 'margin-reader-v5'
 const APP_BASE = new URL(self.registration.scope).pathname
-const APP_SHELL = [APP_BASE, `${APP_BASE}manifest.webmanifest`, `${APP_BASE}margin-mark.svg`]
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)))
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME)
+    const pageResponse = await fetch(APP_BASE)
+    const pageHtml = await pageResponse.clone().text()
+    await cache.put(APP_BASE, pageResponse)
+    const appAssets = [...pageHtml.matchAll(/(?:src|href)="([^"]+\.(?:js|css))"/g)]
+      .map((match) => new URL(match[1], self.location.origin).href)
+    await cache.addAll([
+      `${APP_BASE}manifest.webmanifest`,
+      `${APP_BASE}margin-mark.svg`,
+      ...appAssets,
+    ])
+  })())
   self.skipWaiting()
 })
 

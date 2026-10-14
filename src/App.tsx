@@ -61,6 +61,7 @@ function App() {
   const streamRef = useRef<MediaStream | null>(null)
   const workerRef = useRef<Awaited<ReturnType<typeof createWorker>> | null>(null)
   const wordsRef = useRef<WordBox[]>([])
+  const lastOcrProgressRef = useRef('')
   const timeoutRef = useRef<number | null>(null)
   const sessionRef = useRef(0)
   const [frameSize, setFrameSize] = useState({ width: 1, height: 1 })
@@ -100,7 +101,7 @@ function App() {
   const selectedWord = (() => {
     const frameX = (aim.x / 100) * frameSize.width
     const frameY = (aim.y / 100) * frameSize.height
-    const selectableWords = words.filter((word) => word.sightings >= 2 && word.confidence >= 42 && normalizeWord(word.text))
+    const selectableWords = words.filter((word) => word.confidence >= 50 && normalizeWord(word.text))
     const within = selectableWords.find((word) => frameX >= word.x0 && frameX <= word.x1 && frameY >= word.y0 && frameY <= word.y1)
     if (within) return within
 
@@ -117,7 +118,7 @@ function App() {
   })()
 
   const selectedTerm = selectedWord ? normalizeWord(selectedWord.text) : ''
-  const stableWords = words.filter((word) => word.sightings >= 2 && word.confidence >= 42)
+  const stableWords = words.filter((word) => word.confidence >= 50 && normalizeWord(word.text))
   const currentDefinition = definitionTerm === selectedTerm ? definition : null
   const currentDefinitionSource = definitionTerm === selectedTerm ? definitionSource : ''
   const currentDefinitionLoading = definitionLoading && definitionLoadingTerm === selectedTerm
@@ -125,16 +126,18 @@ function App() {
   useEffect(() => {
     if (!selectedTerm) return
     const controller = new AbortController()
-    const timer = window.setTimeout(() => {
+    queueMicrotask(() => {
+      if (controller.signal.aborted) return
       setDefinitionLoading(true)
       setDefinitionLoadingTerm(selectedTerm)
-      void lookupWord(selectedTerm, controller.signal)
+    })
+    void lookupWord(selectedTerm, controller.signal)
         .then((entry) => {
           if (controller.signal.aborted) return
           const fallback = fallbackDefinitions[selectedTerm]
           setDefinition(entry ?? fallback ?? null)
           setDefinitionTerm(selectedTerm)
-          setDefinitionSource(entry ? 'WordNet 3.1' : fallback ? 'Built-in definition' : 'Not in WordNet')
+          setDefinitionSource(entry?.source ?? (entry ? 'WordNet 3.1' : fallback ? 'Built-in definition' : 'Not in WordNet'))
         })
         .catch(() => {
           if (controller.signal.aborted) return
@@ -143,13 +146,11 @@ function App() {
           setDefinitionTerm(selectedTerm)
           setDefinitionSource(fallback ? 'Built-in definition' : 'Offline dictionary unavailable')
         })
-        .finally(() => {
-          if (!controller.signal.aborted) setDefinitionLoading(false)
-        })
-    }, 350)
+      .finally(() => {
+        if (!controller.signal.aborted) setDefinitionLoading(false)
+      })
 
     return () => {
-      window.clearTimeout(timer)
       controller.abort()
     }
   }, [selectedTerm])
@@ -196,8 +197,14 @@ function App() {
 
       const worker = await createWorker('eng', 1, {
         logger: (event) => {
-          if (session === sessionRef.current && event.status === 'recognizing text') {
-            setScanMessage('Reading the page')
+          if (session !== sessionRef.current) return
+          const progress = Math.round(event.progress * 100)
+          const label = event.status === 'recognizing text'
+            ? `Reading the page · ${progress}%`
+            : `${event.status} · ${progress}%`
+          if (label !== lastOcrProgressRef.current) {
+            lastOcrProgressRef.current = label
+            setScanMessage(label)
           }
         },
       })
@@ -219,7 +226,8 @@ function App() {
           return
         }
 
-        const scale = Math.min(1, 1280 / video.videoWidth)
+        const scanStartedAt = performance.now()
+        const scale = Math.min(1, 960 / video.videoWidth)
         canvas.width = Math.round(video.videoWidth * scale)
         canvas.height = Math.round(video.videoHeight * scale)
         const recognitionFrameWidth = canvas.width
@@ -239,7 +247,7 @@ function App() {
           const previousWords = wordsRef.current
           const matchedPrevious = new Set<number>()
           const foundWords = recognizedWords
-            .filter((word) => word.confidence >= 22 && normalizeWord(word.text))
+            .filter((word) => word.confidence >= 35 && normalizeWord(word.text))
             .map((word) => {
               const detected = {
               text: word.text.trim(),
@@ -281,19 +289,20 @@ function App() {
           wordsRef.current = foundWords
           setWords(foundWords)
           const recognizedText = result.data.text.trim()
-          const stableCount = foundWords.filter((word) => word.sightings >= 2 && word.confidence >= 42).length
-          setScanMessage(stableCount
-            ? `${stableCount} steady words · tap or point to explore`
+          const readableCount = foundWords.filter((word) => word.confidence >= 50).length
+          const elapsedSeconds = ((performance.now() - scanStartedAt) / 1000).toFixed(1)
+          setScanMessage(readableCount
+            ? `${readableCount} readable · ${elapsedSeconds}s · tap or point`
             : foundWords.length
-              ? 'Holding the page steady to confirm words…'
+              ? `Text is uncertain · steady the page (${elapsedSeconds}s)`
             : recognizedText
-                ? 'Text is uncertain · steady the page and reduce glare'
-                : 'No text found · flatten the page and check the light')
+                ? `Text is unclear · reduce glare (${elapsedSeconds}s)`
+                : `No text found · check focus and light (${elapsedSeconds}s)`)
         } catch {
           if (session === sessionRef.current) setScanMessage('Having trouble reading; adjusting focus…')
         }
 
-        if (session === sessionRef.current) timeoutRef.current = window.setTimeout(recognizeFrame, 1150)
+        if (session === sessionRef.current) timeoutRef.current = window.setTimeout(recognizeFrame, 180)
       }
 
       void recognizeFrame()
@@ -497,7 +506,7 @@ function App() {
 
             <div className="how-it-works">
               <div className="how-heading"><CircleHelp size={15} /><span>ABOUT THIS READER</span></div>
-              <p>WordNet meanings are looked up on-device. Each letter is cached after its first load; eye-gaze tracking needs a separate calibrated model.</p>
+              <p>Definitions load online first, with WordNet as an on-device fallback. Eye-gaze tracking needs a separate calibrated model.</p>
             </div>
 
             {savedWords.length > 0 && (
