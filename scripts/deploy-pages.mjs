@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { cpSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +30,7 @@ try {
   for (const entry of readdirSync(distDirectory)) {
     cpSync(join(distDirectory, entry), join(deployDirectory, entry), { recursive: true })
   }
+  writeFileSync(join(deployDirectory, '.nojekyll'), '')
 
   runGit(['init', '--initial-branch=gh-pages'])
   runGit(['config', 'user.name', authorName])
