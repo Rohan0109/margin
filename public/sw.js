@@ -1,4 +1,4 @@
-const CACHE_NAME = 'margin-reader-v2'
+const CACHE_NAME = 'margin-reader-v3'
 const APP_BASE = new URL(self.registration.scope).pathname
 const APP_SHELL = [APP_BASE, `${APP_BASE}manifest.webmanifest`, `${APP_BASE}margin-mark.svg`]
 
