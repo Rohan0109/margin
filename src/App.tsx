@@ -15,6 +15,7 @@ import {
   Volume2,
 } from 'lucide-react'
 import { createWorker } from 'tesseract.js'
+import { lookupWord, normalizeWord, type DictionaryEntry } from './wordnet'
 import './App.css'
 
 type WordBox = {
@@ -24,13 +25,7 @@ type WordBox = {
   y0: number
   x1: number
   y1: number
-}
-
-type Definition = {
-  partOfSpeech: string
-  meaning: string
-  example?: string
-  phonetic?: string
+  sightings: number
 }
 
 type InstallPromptEvent = Event & {
@@ -38,7 +33,7 @@ type InstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
 }
 
-const fallbackDefinitions: Record<string, Definition> = {
+const fallbackDefinitions: Record<string, DictionaryEntry> = {
   curious: {
     partOfSpeech: 'adjective',
     meaning: 'Eager to know or learn something; showing interest in the world.',
@@ -65,6 +60,7 @@ function App() {
   const frameRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const workerRef = useRef<Awaited<ReturnType<typeof createWorker>> | null>(null)
+  const wordsRef = useRef<WordBox[]>([])
   const timeoutRef = useRef<number | null>(null)
   const sessionRef = useRef(0)
   const [frameSize, setFrameSize] = useState({ width: 1, height: 1 })
@@ -74,9 +70,11 @@ function App() {
   const [scanMessage, setScanMessage] = useState('Camera is off')
   const [words, setWords] = useState<WordBox[]>([])
   const [aim, setAim] = useState({ x: 50, y: 50 })
-  const [definition, setDefinition] = useState<Definition | null>(null)
+  const [definition, setDefinition] = useState<DictionaryEntry | null>(null)
   const [definitionLoading, setDefinitionLoading] = useState(false)
+  const [definitionLoadingTerm, setDefinitionLoadingTerm] = useState('')
   const [definitionSource, setDefinitionSource] = useState('')
+  const [definitionTerm, setDefinitionTerm] = useState('')
   const [savedWords, setSavedWords] = useState<string[]>([])
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null)
   const [showInstallHint, setShowInstallHint] = useState(false)
@@ -102,10 +100,11 @@ function App() {
   const selectedWord = (() => {
     const frameX = (aim.x / 100) * frameSize.width
     const frameY = (aim.y / 100) * frameSize.height
-    const within = words.find((word) => frameX >= word.x0 && frameX <= word.x1 && frameY >= word.y0 && frameY <= word.y1)
+    const selectableWords = words.filter((word) => word.sightings >= 2 && word.confidence >= 42 && normalizeWord(word.text))
+    const within = selectableWords.find((word) => frameX >= word.x0 && frameX <= word.x1 && frameY >= word.y0 && frameY <= word.y1)
     if (within) return within
 
-    const closest = words.reduce<{ word: WordBox | null; distance: number }>(
+    const closest = selectableWords.reduce<{ word: WordBox | null; distance: number }>(
       (result, word) => {
         const centerX = (word.x0 + word.x1) / 2
         const centerY = (word.y0 + word.y1) / 2
@@ -114,56 +113,45 @@ function App() {
       },
       { word: null, distance: Number.POSITIVE_INFINITY },
     )
-    return closest.distance < frameSize.width * 0.035 ? closest.word : null
+    return closest.distance < frameSize.width * 0.022 ? closest.word : null
   })()
 
-  const selectedText = selectedWord?.text
+  const selectedTerm = selectedWord ? normalizeWord(selectedWord.text) : ''
+  const currentDefinition = definitionTerm === selectedTerm ? definition : null
+  const currentDefinitionSource = definitionTerm === selectedTerm ? definitionSource : ''
+  const currentDefinitionLoading = definitionLoading && definitionLoadingTerm === selectedTerm
 
   useEffect(() => {
-    if (!selectedText) return
-
+    if (!selectedTerm) return
     const controller = new AbortController()
-    const lookup = async () => {
-      const term = selectedText.replace(/[^\p{L}'-]/gu, '').toLowerCase()
-      if (!term) return
+    const timer = window.setTimeout(() => {
       setDefinitionLoading(true)
-      setDefinition(null)
-      setDefinitionSource('')
-      try {
-        const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`, {
-          signal: controller.signal,
+      setDefinitionLoadingTerm(selectedTerm)
+      void lookupWord(selectedTerm, controller.signal)
+        .then((entry) => {
+          if (controller.signal.aborted) return
+          const fallback = fallbackDefinitions[selectedTerm]
+          setDefinition(entry ?? fallback ?? null)
+          setDefinitionTerm(selectedTerm)
+          setDefinitionSource(entry ? 'WordNet 3.1' : fallback ? 'Built-in definition' : 'Not in WordNet')
         })
-        if (!response.ok) throw new Error('No dictionary entry')
-        const entries = (await response.json()) as Array<{
-          phonetic?: string
-          meanings?: Array<{
-            partOfSpeech?: string
-            definitions?: Array<{ definition?: string; example?: string }>
-          }>
-        }>
-        const firstMeaning = entries[0]?.meanings?.find((meaning) => meaning.definitions?.length)
-        const firstDefinition = firstMeaning?.definitions?.[0]
-        if (!firstDefinition?.definition) throw new Error('No definition')
-        setDefinition({
-          partOfSpeech: firstMeaning?.partOfSpeech ?? 'word',
-          meaning: firstDefinition.definition,
-          example: firstDefinition.example,
-          phonetic: entries[0]?.phonetic,
+        .catch(() => {
+          if (controller.signal.aborted) return
+          const fallback = fallbackDefinitions[selectedTerm]
+          setDefinition(fallback ?? null)
+          setDefinitionTerm(selectedTerm)
+          setDefinitionSource(fallback ? 'Built-in definition' : 'Offline dictionary unavailable')
         })
-        setDefinitionSource('Dictionary')
-      } catch {
-        if (controller.signal.aborted) return
-        const fallback = fallbackDefinitions[term]
-        setDefinition(fallback ?? null)
-        setDefinitionSource(fallback ? 'Quick definition' : 'No entry found')
-      } finally {
-        if (!controller.signal.aborted) setDefinitionLoading(false)
-      }
-    }
+        .finally(() => {
+          if (!controller.signal.aborted) setDefinitionLoading(false)
+        })
+    }, 350)
 
-    void lookup()
-    return () => controller.abort()
-  }, [selectedText])
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [selectedTerm])
 
   useEffect(() => {
     const stage = stageRef.current
@@ -187,6 +175,7 @@ function App() {
     setCameraState('starting')
     setCameraError('')
     setWords([])
+    wordsRef.current = []
     setScanMessage('Requesting camera access')
 
     try {
@@ -232,6 +221,7 @@ function App() {
         const scale = Math.min(1, 1280 / video.videoWidth)
         canvas.width = Math.round(video.videoWidth * scale)
         canvas.height = Math.round(video.videoHeight * scale)
+        const recognitionFrameWidth = canvas.width
         setFrameSize((current) => current.width === canvas.width && current.height === canvas.height
           ? current
           : { width: canvas.width, height: canvas.height })
@@ -243,23 +233,59 @@ function App() {
           const recognizedWords = result.data.blocks?.flatMap((block) =>
             block.paragraphs.flatMap((paragraph) => paragraph.lines.flatMap((line) => line.words)),
           ) ?? []
+          const previousWords = wordsRef.current
+          const matchedPrevious = new Set<number>()
           const foundWords = recognizedWords
-            .filter((word) => word.text.trim().length > 0 && word.confidence >= 15)
-            .map((word) => ({
+            .filter((word) => word.confidence >= 22 && normalizeWord(word.text))
+            .map((word) => {
+              const detected = {
               text: word.text.trim(),
               confidence: word.confidence,
               x0: word.bbox.x0,
               y0: word.bbox.y0,
               x1: word.bbox.x1,
               y1: word.bbox.y1,
-            }))
+              }
+              const normalizedText = normalizeWord(detected.text)
+              let matchIndex = -1
+              let nearestDistance = Number.POSITIVE_INFINITY
+
+              previousWords.forEach((previous, index) => {
+                if (matchedPrevious.has(index) || normalizeWord(previous.text) !== normalizedText) return
+                const distance = Math.hypot(
+                  (detected.x0 + detected.x1 - previous.x0 - previous.x1) / 2,
+                  (detected.y0 + detected.y1 - previous.y0 - previous.y1) / 2,
+                )
+                if (distance < nearestDistance && distance < recognitionFrameWidth * 0.035) {
+                  matchIndex = index
+                  nearestDistance = distance
+                }
+              })
+
+              if (matchIndex < 0) return { ...detected, sightings: 1 }
+              matchedPrevious.add(matchIndex)
+              const previous = previousWords[matchIndex]
+              const blend = (oldValue: number, newValue: number) => oldValue * 0.58 + newValue * 0.42
+              return {
+                ...detected,
+                x0: blend(previous.x0, detected.x0),
+                y0: blend(previous.y0, detected.y0),
+                x1: blend(previous.x1, detected.x1),
+                y1: blend(previous.y1, detected.y1),
+                sightings: previous.sightings + 1,
+              }
+            })
+          wordsRef.current = foundWords
           setWords(foundWords)
           const recognizedText = result.data.text.trim()
-          setScanMessage(foundWords.length
-            ? `${foundWords.length} words found · move the reticle to explore`
+          const stableCount = foundWords.filter((word) => word.sightings >= 2 && word.confidence >= 42).length
+          setScanMessage(stableCount
+            ? `${stableCount} steady words · tap or point to explore`
+            : foundWords.length
+              ? 'Holding the page steady to confirm words…'
             : recognizedText
-              ? 'Text is fuzzy · steady the page and reduce glare'
-              : 'No text found · flatten the page and check the light')
+                ? 'Text is uncertain · steady the page and reduce glare'
+                : 'No text found · flatten the page and check the light')
         } catch {
           if (session === sessionRef.current) setScanMessage('Having trouble reading; adjusting focus…')
         }
@@ -291,6 +317,7 @@ function App() {
     if (worker) void worker.terminate()
     setCameraState('idle')
     setWords([])
+    wordsRef.current = []
     setScanMessage('Camera is off')
   }
 
@@ -413,7 +440,7 @@ function App() {
                     >
                       <span className="tooltip-label">IN THE MARGIN</span>
                       <strong>{selectedWord.text}</strong>
-                      <span>{definitionLoading ? 'Finding its meaning…' : definition?.meaning ?? 'No definition found yet.'}</span>
+                      <span>{currentDefinitionLoading ? 'Finding its meaning…' : currentDefinition?.meaning ?? 'No definition found yet.'}</span>
                     </div>
                   )}
                   <div className="stage-top-label"><ScanLine size={14} /> LIVE TEXT</div>
@@ -442,18 +469,18 @@ function App() {
                 <>
                   <div className="meaning-panel-top"><span className="meaning-overline">WORD IN FOCUS</span><button className={`save-button ${saved ? 'is-saved' : ''}`} type="button" onClick={toggleSavedWord} aria-label={saved ? 'Remove saved word' : 'Save word'} title={saved ? 'Remove saved word' : 'Save word'}>{saved ? <Check size={17} /> : <BookOpen size={17} />}</button></div>
                   <h3 className="focus-word">{selectedWord.text.replace(/[^\p{L}'-]/gu, '')}</h3>
-                  <div className="word-meta"><span>{definition?.partOfSpeech ?? (definitionLoading ? 'looking it up' : 'word')}</span>{definition?.phonetic && <span>{definition.phonetic}</span>}</div>
+                  <div className="word-meta"><span>{currentDefinition?.partOfSpeech ?? (currentDefinitionLoading ? 'looking it up' : 'word')}</span></div>
                   <div className="meaning-rule" />
-                  {definitionLoading ? (
+                  {currentDefinitionLoading ? (
                     <p className="definition-loading"><LoaderCircle size={15} className="spin" /> Finding a clear definition…</p>
-                  ) : definition ? (
+                  ) : currentDefinition ? (
                     <>
-                      <p className="definition-text">{definition.meaning}</p>
-                      {definition.example && <blockquote>“{definition.example}”</blockquote>}
-                      <div className="definition-source"><span>{definitionSource}</span><button type="button" className="audio-button" aria-label="Listen to pronunciation" title="Pronunciation audio is not available yet"><Volume2 size={16} /></button></div>
+                      <p className="definition-text">{currentDefinition.meaning}</p>
+                      {currentDefinition.example && <blockquote>“{currentDefinition.example}”</blockquote>}
+                      <div className="definition-source"><span>{currentDefinitionSource}</span><button type="button" className="audio-button" aria-label="Listen to pronunciation" title="Pronunciation audio is not available yet"><Volume2 size={16} /></button></div>
                     </>
                   ) : (
-                    <p className="definition-text">No definition found for this word. Try holding the page a little steadier or moving closer.</p>
+                    <p className="definition-text">{currentDefinitionSource === 'Not in WordNet' ? 'No meaning for this word was found in the offline WordNet dictionary.' : currentDefinitionSource === 'Offline dictionary unavailable' ? 'The offline dictionary could not be loaded. Reconnect to load this letter for next time.' : 'Looking this word up in the offline dictionary…'}</p>
                   )}
                 </>
               ) : (
@@ -467,7 +494,7 @@ function App() {
 
             <div className="how-it-works">
               <div className="how-heading"><CircleHelp size={15} /><span>ABOUT THIS READER</span></div>
-              <p>Text is read on your device. For now, the reticle selects a word; eye-gaze tracking needs a separate calibrated model.</p>
+              <p>WordNet meanings are looked up on-device. Each letter is cached after its first load; eye-gaze tracking needs a separate calibrated model.</p>
             </div>
 
             {savedWords.length > 0 && (
