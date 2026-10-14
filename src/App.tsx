@@ -117,6 +117,7 @@ function App() {
   })()
 
   const selectedTerm = selectedWord ? normalizeWord(selectedWord.text) : ''
+  const stableWords = words.filter((word) => word.sightings >= 2 && word.confidence >= 42)
   const currentDefinition = definitionTerm === selectedTerm ? definition : null
   const currentDefinitionSource = definitionTerm === selectedTerm ? definitionSource : ''
   const currentDefinitionLoading = definitionLoading && definitionLoadingTerm === selectedTerm
@@ -225,7 +226,9 @@ function App() {
         setFrameSize((current) => current.width === canvas.width && current.height === canvas.height
           ? current
           : { width: canvas.width, height: canvas.height })
+        context.filter = 'grayscale(1) contrast(1.35) brightness(1.05)'
         context.drawImage(video, 0, 0, canvas.width, canvas.height)
+        context.filter = 'none'
 
         try {
           const result = await worker.recognize(canvas, {}, { blocks: true })
@@ -424,7 +427,7 @@ function App() {
               {cameraState === 'live' && (
                 <>
                   <div className="camera-corners" aria-hidden="true"><i /><i /><i /><i /></div>
-                  {words.map((word, index) => {
+                  {stableWords.map((word, index) => {
                     const style = getWordStyle(word)
                     const isSelected = word === selectedWord
                     return <span key={`${word.text}-${word.x0}-${index}`} className={`word-box ${isSelected ? 'word-box-selected' : ''}`} style={style} aria-hidden="true" />
@@ -454,7 +457,7 @@ function App() {
 
             <div className="camera-footer">
               <span><Focus size={15} />{cameraState === 'live' ? 'Tap or point at a word' : 'Aim at a printed page'}</span>
-              <span className="word-count">{cameraState === 'live' ? `${words.length} detected` : 'No photo is taken'}</span>
+              <span className="word-count">{cameraState === 'live' ? `${stableWords.length} steady` : 'No photo is taken'}</span>
             </div>
           </section>
 
