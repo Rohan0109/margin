@@ -1,0 +1,41 @@
+:root {
+  --paper: #f2f2f7;
+  --ink: #1c1c1e;
+  --muted: #77777d;
+  --rule: #e3e3e8;
+  --forest: #248a3d;
+  --forest-soft: #34a853;
+  --citron: #d9f6bf;
+  --rust: #bf5b45;
+  --serif: 'New York', 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  --mono: 'SF Mono', ui-monospace, Consolas, monospace;
+
+  color: var(--ink);
+  background: var(--paper);
+  font-family: var(--sans);
+  font-synthesis: none;
+  font-optical-sizing: auto;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+
+html { min-width: 320px; min-height: 100%; background: var(--paper); }
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--paper);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+button { font: inherit; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--rust); outline-offset: 3px; }
+::selection { color: var(--ink); background: #dceaa8; }
+
+#root { min-height: 100vh; min-height: 100dvh; }

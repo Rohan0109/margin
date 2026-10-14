@@ -1,0 +1,485 @@
+import { useEffect, useRef, useState } from 'react'
+import {
+  BookOpen,
+  Camera,
+  Check,
+  CircleHelp,
+  Focus,
+  Download,
+  LoaderCircle,
+  Pause,
+  RotateCcw,
+  ScanLine,
+  Sparkles,
+  Share,
+  Volume2,
+} from 'lucide-react'
+import { createWorker } from 'tesseract.js'
+import './App.css'
+
+type WordBox = {
+  text: string
+  confidence: number
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
+type Definition = {
+  partOfSpeech: string
+  meaning: string
+  example?: string
+  phonetic?: string
+}
+
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
+}
+
+const fallbackDefinitions: Record<string, Definition> = {
+  curious: {
+    partOfSpeech: 'adjective',
+    meaning: 'Eager to know or learn something; showing interest in the world.',
+    example: 'A curious reader notices the small details.',
+  },
+  luminous: {
+    partOfSpeech: 'adjective',
+    meaning: 'Full of or shedding light; bright or shining.',
+    example: 'The luminous page caught the afternoon sun.',
+  },
+  quiet: {
+    partOfSpeech: 'adjective',
+    meaning: 'Making little or no noise; calm and still.',
+  },
+  journey: {
+    partOfSpeech: 'noun',
+    meaning: 'An act of travelling from one place to another, often over a long distance.',
+  },
+}
+
+function App() {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const stageRef = useRef<HTMLDivElement>(null)
+  const frameRef = useRef<HTMLCanvasElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const workerRef = useRef<Awaited<ReturnType<typeof createWorker>> | null>(null)
+  const timeoutRef = useRef<number | null>(null)
+  const sessionRef = useRef(0)
+  const [frameSize, setFrameSize] = useState({ width: 1, height: 1 })
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
+  const [cameraState, setCameraState] = useState<'idle' | 'starting' | 'live' | 'error'>('idle')
+  const [cameraError, setCameraError] = useState('')
+  const [scanMessage, setScanMessage] = useState('Camera is off')
+  const [words, setWords] = useState<WordBox[]>([])
+  const [aim, setAim] = useState({ x: 50, y: 50 })
+  const [definition, setDefinition] = useState<Definition | null>(null)
+  const [definitionLoading, setDefinitionLoading] = useState(false)
+  const [definitionSource, setDefinitionSource] = useState('')
+  const [savedWords, setSavedWords] = useState<string[]>([])
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null)
+  const [showInstallHint, setShowInstallHint] = useState(false)
+  const [isIos] = useState(() => {
+    const browser = navigator as Navigator & { standalone?: boolean }
+    return /iPad|iPhone|iPod/.test(browser.userAgent) && !browser.standalone
+  })
+
+  useEffect(() => {
+    const handleInstallPrompt = (event: Event) => {
+      event.preventDefault()
+      setInstallPrompt(event as InstallPromptEvent)
+    }
+    const handleInstalled = () => setInstallPrompt(null)
+    window.addEventListener('beforeinstallprompt', handleInstallPrompt)
+    window.addEventListener('appinstalled', handleInstalled)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleInstallPrompt)
+      window.removeEventListener('appinstalled', handleInstalled)
+    }
+  }, [])
+
+  const selectedWord = (() => {
+    const frameX = (aim.x / 100) * frameSize.width
+    const frameY = (aim.y / 100) * frameSize.height
+    const within = words.find((word) => frameX >= word.x0 && frameX <= word.x1 && frameY >= word.y0 && frameY <= word.y1)
+    if (within) return within
+
+    const closest = words.reduce<{ word: WordBox | null; distance: number }>(
+      (result, word) => {
+        const centerX = (word.x0 + word.x1) / 2
+        const centerY = (word.y0 + word.y1) / 2
+        const distance = Math.hypot(frameX - centerX, frameY - centerY)
+        return distance < result.distance ? { word, distance } : result
+      },
+      { word: null, distance: Number.POSITIVE_INFINITY },
+    )
+    return closest.distance < frameSize.width * 0.035 ? closest.word : null
+  })()
+
+  const selectedText = selectedWord?.text
+
+  useEffect(() => {
+    if (!selectedText) return
+
+    const controller = new AbortController()
+    const lookup = async () => {
+      const term = selectedText.replace(/[^\p{L}'-]/gu, '').toLowerCase()
+      if (!term) return
+      setDefinitionLoading(true)
+      setDefinition(null)
+      setDefinitionSource('')
+      try {
+        const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term)}`, {
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error('No dictionary entry')
+        const entries = (await response.json()) as Array<{
+          phonetic?: string
+          meanings?: Array<{
+            partOfSpeech?: string
+            definitions?: Array<{ definition?: string; example?: string }>
+          }>
+        }>
+        const firstMeaning = entries[0]?.meanings?.find((meaning) => meaning.definitions?.length)
+        const firstDefinition = firstMeaning?.definitions?.[0]
+        if (!firstDefinition?.definition) throw new Error('No definition')
+        setDefinition({
+          partOfSpeech: firstMeaning?.partOfSpeech ?? 'word',
+          meaning: firstDefinition.definition,
+          example: firstDefinition.example,
+          phonetic: entries[0]?.phonetic,
+        })
+        setDefinitionSource('Dictionary')
+      } catch {
+        if (controller.signal.aborted) return
+        const fallback = fallbackDefinitions[term]
+        setDefinition(fallback ?? null)
+        setDefinitionSource(fallback ? 'Quick definition' : 'No entry found')
+      } finally {
+        if (!controller.signal.aborted) setDefinitionLoading(false)
+      }
+    }
+
+    void lookup()
+    return () => controller.abort()
+  }, [selectedText])
+
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return
+    const observer = new ResizeObserver(([entry]) => {
+      setStageSize({ width: entry.contentRect.width, height: entry.contentRect.height })
+    })
+    observer.observe(stage)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => () => {
+    sessionRef.current += 1
+    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current)
+    streamRef.current?.getTracks().forEach((track) => track.stop())
+    void workerRef.current?.terminate()
+  }, [])
+
+  const startCamera = async () => {
+    const session = ++sessionRef.current
+    setCameraState('starting')
+    setCameraError('')
+    setWords([])
+    setScanMessage('Requesting camera access')
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1600 }, height: { ideal: 1000 } },
+      })
+      if (session !== sessionRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+      streamRef.current = stream
+      if (!videoRef.current) throw new Error('Camera preview is unavailable')
+      videoRef.current.srcObject = stream
+      await videoRef.current.play()
+      setScanMessage('Preparing text recognition')
+
+      const worker = await createWorker('eng', 1, {
+        logger: (event) => {
+          if (session === sessionRef.current && event.status === 'recognizing text') {
+            setScanMessage('Reading the page')
+          }
+        },
+      })
+      if (session !== sessionRef.current) {
+        await worker.terminate()
+        return
+      }
+      workerRef.current = worker
+      setCameraState('live')
+      setScanMessage('Finding words on the page')
+
+      const recognizeFrame = async () => {
+        if (session !== sessionRef.current) return
+        const video = videoRef.current
+        const canvas = frameRef.current
+        const context = canvas?.getContext('2d', { willReadFrequently: true })
+        if (!video || !canvas || !context || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+          timeoutRef.current = window.setTimeout(recognizeFrame, 350)
+          return
+        }
+
+        const scale = Math.min(1, 1280 / video.videoWidth)
+        canvas.width = Math.round(video.videoWidth * scale)
+        canvas.height = Math.round(video.videoHeight * scale)
+        setFrameSize((current) => current.width === canvas.width && current.height === canvas.height
+          ? current
+          : { width: canvas.width, height: canvas.height })
+        context.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+        try {
+          const result = await worker.recognize(canvas, {}, { blocks: true })
+          if (session !== sessionRef.current) return
+          const recognizedWords = result.data.blocks?.flatMap((block) =>
+            block.paragraphs.flatMap((paragraph) => paragraph.lines.flatMap((line) => line.words)),
+          ) ?? []
+          const foundWords = recognizedWords
+            .filter((word) => word.text.trim().length > 0 && word.confidence >= 15)
+            .map((word) => ({
+              text: word.text.trim(),
+              confidence: word.confidence,
+              x0: word.bbox.x0,
+              y0: word.bbox.y0,
+              x1: word.bbox.x1,
+              y1: word.bbox.y1,
+            }))
+          setWords(foundWords)
+          const recognizedText = result.data.text.trim()
+          setScanMessage(foundWords.length
+            ? `${foundWords.length} words found · move the reticle to explore`
+            : recognizedText
+              ? 'Text is fuzzy · steady the page and reduce glare'
+              : 'No text found · flatten the page and check the light')
+        } catch {
+          if (session === sessionRef.current) setScanMessage('Having trouble reading; adjusting focus…')
+        }
+
+        if (session === sessionRef.current) timeoutRef.current = window.setTimeout(recognizeFrame, 1150)
+      }
+
+      void recognizeFrame()
+    } catch (error) {
+      if (session !== sessionRef.current) return
+      streamRef.current?.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+      const message = error instanceof Error ? error.message : 'Camera could not be started.'
+      setCameraError(message.includes('Permission') ? 'Allow camera access in your browser to scan a page.' : message)
+      setCameraState('error')
+      setScanMessage('Camera unavailable')
+    }
+  }
+
+  const stopCamera = () => {
+    sessionRef.current += 1
+    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current)
+    timeoutRef.current = null
+    streamRef.current?.getTracks().forEach((track) => track.stop())
+    streamRef.current = null
+    if (videoRef.current) videoRef.current.srcObject = null
+    const worker = workerRef.current
+    workerRef.current = null
+    if (worker) void worker.terminate()
+    setCameraState('idle')
+    setWords([])
+    setScanMessage('Camera is off')
+  }
+
+  const getWordStyle = (word: WordBox): React.CSSProperties => {
+    const bounds = stageSize
+    if (!bounds.width || !bounds.height) return {}
+    const scale = Math.max(bounds.width / frameSize.width, bounds.height / frameSize.height)
+    const renderedWidth = frameSize.width * scale
+    const renderedHeight = frameSize.height * scale
+    const offsetX = (bounds.width - renderedWidth) / 2
+    const offsetY = (bounds.height - renderedHeight) / 2
+    return {
+      left: `${((word.x0 * scale + offsetX) / bounds.width) * 100}%`,
+      top: `${((word.y0 * scale + offsetY) / bounds.height) * 100}%`,
+      width: `${(((word.x1 - word.x0) * scale) / bounds.width) * 100}%`,
+      height: `${(((word.y1 - word.y0) * scale) / bounds.height) * 100}%`,
+    }
+  }
+
+  const moveAim = (event: React.PointerEvent<HTMLDivElement>) => {
+    const stage = stageRef.current
+    if (!stage) return
+    const bounds = stage.getBoundingClientRect()
+    const scale = Math.max(bounds.width / frameSize.width, bounds.height / frameSize.height)
+    const offsetX = (bounds.width - frameSize.width * scale) / 2
+    const offsetY = (bounds.height - frameSize.height * scale) / 2
+    const x = ((event.clientX - bounds.left - offsetX) / (frameSize.width * scale)) * 100
+    const y = ((event.clientY - bounds.top - offsetY) / (frameSize.height * scale)) * 100
+    setAim({ x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) })
+  }
+
+  const toggleSavedWord = () => {
+    if (!selectedWord) return
+    const word = selectedWord.text.toLowerCase()
+    setSavedWords((current) => current.includes(word) ? current.filter((item) => item !== word) : [...current, word])
+  }
+
+  const handleInstall = async () => {
+    if (!installPrompt) {
+      setShowInstallHint((visible) => !visible)
+      return
+    }
+    await installPrompt.prompt()
+    await installPrompt.userChoice
+    setInstallPrompt(null)
+  }
+
+  const saved = selectedWord ? savedWords.includes(selectedWord.text.toLowerCase()) : false
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="#reader" aria-label="Margin home">
+          <span className="brand-mark"><BookOpen size={19} strokeWidth={1.8} /></span>
+          <span>margin<span className="brand-period">.</span></span>
+        </a>
+        <div className="topbar-center"><span className="chapter-index">01</span><span className="topbar-divider" /><span>Live reader</span></div>
+        <div className="topbar-actions">
+          {(installPrompt || isIos) && <button type="button" className="install-button" onClick={handleInstall}><Download size={15} />Install</button>}
+          <div className="topbar-status"><span className={`status-dot ${cameraState === 'live' ? 'is-live' : ''}`} />{cameraState === 'live' ? 'Camera active' : 'Ready'}</div>
+        </div>
+      </header>
+
+      <section className="reader-page" id="reader">
+        {showInstallHint && isIos && <div className="install-hint" role="status"><Share size={16} />Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong> to install Margin.<button type="button" onClick={() => setShowInstallHint(false)} aria-label="Dismiss install tip">×</button></div>}
+        <div className="page-heading">
+          <div>
+            <p className="eyebrow"><span className="eyebrow-line" />READ ALONG / 01</p>
+            <h1>A little help<br className="mobile-break" /> with the <em>hard words.</em></h1>
+            <p className="page-intro">Hold a page in view. We’ll find the words and bring their meaning into the margin.</p>
+          </div>
+          <div className="page-number" aria-hidden="true"><span>FIELD</span><strong>01</strong><span>NOTES</span></div>
+        </div>
+
+        <div className="reader-grid">
+          <section className="camera-column" aria-label="Live book camera">
+            <div className="section-heading">
+              <div><span className="section-kicker">YOUR PAGE</span><h2>Reading window</h2></div>
+              <div className="live-counter"><span className={`status-dot ${cameraState === 'live' ? 'is-live' : ''}`} />{cameraState === 'live' ? 'LIVE' : 'STANDBY'}</div>
+            </div>
+
+            <div
+              className={`camera-stage ${cameraState === 'live' ? 'camera-stage-live' : ''}`}
+              ref={stageRef}
+              onPointerMove={moveAim}
+              onPointerDown={moveAim}
+            >
+              <video ref={videoRef} className="camera-video" autoPlay muted playsInline aria-label="Live view of your book page" />
+              <canvas ref={frameRef} className="recognition-canvas" aria-hidden="true" />
+
+              {cameraState !== 'live' && (
+                <div className="camera-empty">
+                  <span className="camera-emblem"><Camera size={27} strokeWidth={1.5} /></span>
+                  <p className="empty-title">A page, in focus.</p>
+                  <p className="empty-copy">Set your book in good light and bring a page into view.</p>
+                  {cameraState === 'error' && <p className="camera-error" role="alert">{cameraError}</p>}
+                  <button className="primary-button" type="button" onClick={startCamera} disabled={cameraState === 'starting'}>
+                    {cameraState === 'starting' ? <LoaderCircle className="spin" size={17} /> : <Camera size={17} />}
+                    {cameraState === 'starting' ? 'Waking the camera…' : 'Turn on camera'}
+                  </button>
+                </div>
+              )}
+
+              {cameraState === 'live' && (
+                <>
+                  <div className="camera-corners" aria-hidden="true"><i /><i /><i /><i /></div>
+                  {words.map((word, index) => {
+                    const style = getWordStyle(word)
+                    const isSelected = word === selectedWord
+                    return <span key={`${word.text}-${word.x0}-${index}`} className={`word-box ${isSelected ? 'word-box-selected' : ''}`} style={style} aria-hidden="true" />
+                  })}
+                  <div className="aim-reticle" style={{ left: `${aim.x}%`, top: `${aim.y}%` }} aria-hidden="true"><span /><i /></div>
+                  {selectedWord && (
+                    <div
+                      className="word-tooltip"
+                      style={{
+                        left: `clamp(0.6rem, ${aim.x}%, calc(100% - 15rem))`,
+                        top: `${Math.max(14, aim.y)}%`,
+                      }}
+                    >
+                      <span className="tooltip-label">IN THE MARGIN</span>
+                      <strong>{selectedWord.text}</strong>
+                      <span>{definitionLoading ? 'Finding its meaning…' : definition?.meaning ?? 'No definition found yet.'}</span>
+                    </div>
+                  )}
+                  <div className="stage-top-label"><ScanLine size={14} /> LIVE TEXT</div>
+                  <button className="stage-aim-reset" type="button" onClick={() => setAim({ x: 50, y: 50 })} aria-label="Center aim point" title="Center aim point"><RotateCcw size={15} /></button>
+                  <button className="stage-stop" type="button" onClick={stopCamera} aria-label="Stop camera" title="Stop camera"><Pause size={15} /></button>
+                </>
+              )}
+
+              <div className="stage-caption"><span className={`status-dot ${cameraState === 'live' ? 'is-live' : ''}`} />{scanMessage}</div>
+            </div>
+
+            <div className="camera-footer">
+              <span><Focus size={15} />{cameraState === 'live' ? 'Tap or point at a word' : 'Aim at a printed page'}</span>
+              <span className="word-count">{cameraState === 'live' ? `${words.length} detected` : 'No photo is taken'}</span>
+            </div>
+          </section>
+
+          <aside className="meaning-column" aria-label="Word meaning">
+            <div className="section-heading meaning-heading">
+              <div><span className="section-kicker">A CLOSER LOOK</span><h2>In the margin</h2></div>
+              <Sparkles size={18} className="meaning-sparkle" strokeWidth={1.6} />
+            </div>
+
+            <div className={`meaning-panel ${selectedWord ? 'meaning-panel-active' : ''}`} aria-live="polite">
+              {selectedWord ? (
+                <>
+                  <div className="meaning-panel-top"><span className="meaning-overline">WORD IN FOCUS</span><button className={`save-button ${saved ? 'is-saved' : ''}`} type="button" onClick={toggleSavedWord} aria-label={saved ? 'Remove saved word' : 'Save word'} title={saved ? 'Remove saved word' : 'Save word'}>{saved ? <Check size={17} /> : <BookOpen size={17} />}</button></div>
+                  <h3 className="focus-word">{selectedWord.text.replace(/[^\p{L}'-]/gu, '')}</h3>
+                  <div className="word-meta"><span>{definition?.partOfSpeech ?? (definitionLoading ? 'looking it up' : 'word')}</span>{definition?.phonetic && <span>{definition.phonetic}</span>}</div>
+                  <div className="meaning-rule" />
+                  {definitionLoading ? (
+                    <p className="definition-loading"><LoaderCircle size={15} className="spin" /> Finding a clear definition…</p>
+                  ) : definition ? (
+                    <>
+                      <p className="definition-text">{definition.meaning}</p>
+                      {definition.example && <blockquote>“{definition.example}”</blockquote>}
+                      <div className="definition-source"><span>{definitionSource}</span><button type="button" className="audio-button" aria-label="Listen to pronunciation" title="Pronunciation audio is not available yet"><Volume2 size={16} /></button></div>
+                    </>
+                  ) : (
+                    <p className="definition-text">No definition found for this word. Try holding the page a little steadier or moving closer.</p>
+                  )}
+                </>
+              ) : (
+                <div className="meaning-empty">
+                  <span className="empty-ornament"><BookOpen size={22} strokeWidth={1.4} /></span>
+                  <p className="empty-title">A word will find its way here.</p>
+                  <p>Once the page is in view, tap or point at a word to see what it means.</p>
+                </div>
+              )}
+            </div>
+
+            <div className="how-it-works">
+              <div className="how-heading"><CircleHelp size={15} /><span>ABOUT THIS READER</span></div>
+              <p>Text is read on your device. For now, the reticle selects a word; eye-gaze tracking needs a separate calibrated model.</p>
+            </div>
+
+            {savedWords.length > 0 && (
+              <div className="saved-words"><div className="saved-heading"><BookOpen size={14} />SAVED WORDS <span>{savedWords.length}</span></div><p>{savedWords.join(' · ')}</p></div>
+            )}
+          </aside>
+        </div>
+
+        <footer className="page-footer"><span>READ AT YOUR OWN PACE</span><span className="footer-mark"><span />MARGIN READER</span><span>CAMERA SESSION STAYS ON THIS DEVICE</span></footer>
+      </section>
+    </main>
+  )
+}
+
+export default App
